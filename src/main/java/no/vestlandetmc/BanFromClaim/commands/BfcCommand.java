@@ -9,7 +9,6 @@ import no.vestlandetmc.BanFromClaim.config.Messages;
 import no.vestlandetmc.BanFromClaim.handler.MessageHandler;
 import no.vestlandetmc.BanFromClaim.handler.Permissions;
 import no.vestlandetmc.BanFromClaim.hooks.RegionHook;
-import no.vestlandetmc.BanFromClaim.utils.LocationFinder;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.OfflinePlayer;
@@ -32,73 +31,86 @@ public class BfcCommand implements BasicCommand {
 		}
 
 		final RegionHook region = BfcPlugin.getHookManager().getActiveRegionHook();
-		final String regionID = region.getRegionID(player);
+		if (region == null) {
+			MessageHandler.sendMessage(player, "&cNo supported protection plugin is hooked.");
+			return;
+		}
 
 		if (args.length == 0) {
 			MessageHandler.sendMessage(player, Messages.NO_ARGUMENTS);
 			return;
 		}
 
+		final String regionID = region.getRegionID(player);
 		if (regionID == null) {
 			MessageHandler.sendMessage(player, Messages.OUTSIDE_CLAIM);
 			return;
 		}
 
 		final OfflinePlayer bannedPlayer = Bukkit.getOfflinePlayer(args[0]);
-		boolean allowBan = player.hasPermission("bfc.admin") || region.isOwner(player, regionID) || region.isManager(player, regionID);
 
-		if (bannedPlayer.getUniqueId().toString().equals(player.getUniqueId().toString())) {
+		if (bannedPlayer.getUniqueId().equals(player.getUniqueId())) {
 			MessageHandler.sendMessage(player, Messages.BAN_SELF);
 			return;
-		} else if (!bannedPlayer.hasPlayedBefore()) {
-			MessageHandler.sendMessage(player, Messages.placeholders(Messages.UNVALID_PLAYERNAME, args[0], player.getDisplayName(), null));
+		}
+
+		if (!bannedPlayer.hasPlayedBefore()) {
+			MessageHandler.sendMessage(player, Messages.placeholders(
+					Messages.UNVALID_PLAYERNAME, args[0], player.getDisplayName(), null
+			));
 			return;
-		} else if (region.isOwner(bannedPlayer, regionID)) {
+		}
+
+		if (region.isOwner(bannedPlayer, regionID)) {
 			MessageHandler.sendMessage(player, Messages.BAN_OWNER);
 			return;
 		}
 
-		if (bannedPlayer.isOnline() && bannedPlayer.getPlayer().hasPermission("bfc.bypass")) {
-			MessageHandler.sendMessage(player, Messages.placeholders(Messages.PROTECTED, bannedPlayer.getPlayer().getDisplayName(), null, null));
-			return;
+		// If target is online and has bypass, block ban
+		if (bannedPlayer.isOnline()) {
+			final Player target = bannedPlayer.getPlayer();
+			if (target != null && target.hasPermission("bfc.bypass")) {
+				MessageHandler.sendMessage(player, Messages.placeholders(
+						Messages.PROTECTED, target.getDisplayName(), null, null
+				));
+				return;
+			}
 		}
+
+		final boolean allowBan = player.hasPermission("bfc.admin")
+				|| region.isOwner(player, regionID)
+				|| region.isManager(player, regionID);
 
 		if (!allowBan) {
 			MessageHandler.sendMessage(player, Messages.NO_ACCESS);
-		} else {
-			final String claimOwner = region.getClaimOwnerName(regionID);
+			return;
+		}
 
-			final int sizeRadius = region.sizeRadius(regionID);
-			final Location greaterCorner = region.getGreaterBoundaryCorner(regionID);
-			final Location lesserCorner = region.getLesserBoundaryCorner(regionID);
+		final String claimOwner = region.getClaimOwnerName(regionID);
 
-			if (setClaimData(regionID, bannedPlayer.getUniqueId().toString(), true)) {
-				if (bannedPlayer.isOnline()) {
-					if (region.isInsideRegion(bannedPlayer.getPlayer(), regionID)) {
-						final Location bannedLoc = bannedPlayer.getPlayer().getLocation();
-						final LocationFinder lf = new LocationFinder(greaterCorner, lesserCorner, bannedLoc.getWorld().getUID(), sizeRadius);
+		// Save ban
+		if (!setClaimData(regionID, bannedPlayer.getUniqueId().toString(), true)) {
+			MessageHandler.sendMessage(player, Messages.ALREADY_BANNED);
+			return;
+		}
 
-						Bukkit.getScheduler().runTaskAsynchronously(BfcPlugin.getPlugin(), () -> lf.IterateCircumferences(randomCircumferenceRadiusLoc -> {
-							if (randomCircumferenceRadiusLoc == null) {
-								if (Config.SAFE_LOCATION == null) {
-									bannedPlayer.getPlayer().teleport(bannedLoc.getWorld().getSpawnLocation());
-								} else {
-									bannedPlayer.getPlayer().teleport(Config.SAFE_LOCATION);
-								}
-							} else {
-								bannedPlayer.getPlayer().teleport(randomCircumferenceRadiusLoc);
-							}
+		// Notify banner
+		MessageHandler.sendMessage(player, Messages.placeholders(Messages.BANNED, bannedPlayer.getName(), null, null));
 
-							MessageHandler.sendMessage(bannedPlayer.getPlayer(), Messages.placeholders(Messages.BANNED_TARGET, bannedPlayer.getName(), player.getDisplayName(), claimOwner));
+		// If target is online and currently inside this region -> immediately send to safespot/spawn
+		if (bannedPlayer.isOnline()) {
+			final Player target = bannedPlayer.getPlayer();
+			if (target != null && region.isInsideRegion(target, regionID)) {
 
-						}));
-					}
-				}
+				final Location dest = Config.getBannedTeleportTarget(target.getWorld());
 
-				MessageHandler.sendMessage(player, Messages.placeholders(Messages.BANNED, bannedPlayer.getName(), null, null));
-
-			} else {
-				MessageHandler.sendMessage(player, Messages.ALREADY_BANNED);
+				// Teleport MUST be on main thread
+				Bukkit.getScheduler().runTask(BfcPlugin.getPlugin(), () -> {
+					target.teleport(dest);
+					MessageHandler.sendMessage(target, Messages.placeholders(
+							Messages.BANNED_TARGET, bannedPlayer.getName(), player.getDisplayName(), claimOwner
+					));
+				});
 			}
 		}
 	}
