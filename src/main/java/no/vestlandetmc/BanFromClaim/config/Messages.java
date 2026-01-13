@@ -1,12 +1,15 @@
 package no.vestlandetmc.BanFromClaim.config;
 
-public class Messages extends ConfigHandler {
+import no.vestlandetmc.BanFromClaim.BfcPlugin;
+import org.bukkit.configuration.file.FileConfiguration;
+import org.bukkit.configuration.file.YamlConfiguration;
 
-	private static Messages INSTANCE;
+import java.io.File;
 
-	private Messages(String fileName) {
-		super(fileName);
-	}
+public final class Messages {
+
+	private static File file;
+	private static FileConfiguration cfg;
 
 	public static String
 			UNVALID_PLAYERNAME,
@@ -35,7 +38,35 @@ public class Messages extends ConfigHandler {
 			UNBAN_ALL,
 			LIST_BAN_ALL;
 
-	private void onLoad() {
+	private Messages() {}
+
+	public static void initialize() {
+		loadFromDisk();
+		applyValues();
+	}
+
+	public static void reload() {
+		loadFromDisk();
+		applyValues();
+	}
+
+	private static void loadFromDisk() {
+		if (!BfcPlugin.getPlugin().getDataFolder().exists()) {
+			//noinspection ResultOfMethodCallIgnored
+			BfcPlugin.getPlugin().getDataFolder().mkdirs();
+		}
+
+		file = new File(BfcPlugin.getPlugin().getDataFolder(), "messages.yml");
+
+		// If missing, copy default from jar
+		if (!file.exists()) {
+			BfcPlugin.getPlugin().saveResource("messages.yml", false);
+		}
+
+		cfg = YamlConfiguration.loadConfiguration(file);
+	}
+
+	private static void applyValues() {
 		UNVALID_PLAYERNAME = getString("unvalid-playername");
 		OUTSIDE_CLAIM = getString("outside-claim");
 		NO_ARGUMENTS = getString("no-arguments");
@@ -63,29 +94,16 @@ public class Messages extends ConfigHandler {
 		LIST_BAN_ALL = getString("list-ban-all");
 	}
 
-	/** Called on plugin enable */
-	public static void initialize() {
-		INSTANCE = new Messages("messages.yml");
-		INSTANCE.onLoad();
-	}
-
-	/** Called by /bfc reload */
-	public static void reload() {
-		if (INSTANCE == null) {
-			// plugin might be calling reload before initialize (failsafe)
-			initialize();
-			return;
+	private static String getString(String path) {
+		if (cfg == null) {
+			return "&c(messages.yml not loaded) " + path;
 		}
-
-		// IMPORTANT: ConfigHandler must expose reloadConfig()
-		// Most likely you already have this method (since Config has initialize()).
-		INSTANCE.reloadConfig();
-
-		// Re-assign all the static message strings
-		INSTANCE.onLoad();
+		final String val = cfg.getString(path);
+		return (val == null) ? ("&cMissing message: " + path) : val;
 	}
 
 	public static String placeholders(String message, String target, String source, String claimowner) {
+		if (message == null) return "";
 		return message
 				.replace("%target%", target == null ? "" : target)
 				.replace("%source%", source == null ? "" : source)
