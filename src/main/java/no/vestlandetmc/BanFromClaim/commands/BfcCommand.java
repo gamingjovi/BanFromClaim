@@ -24,15 +24,24 @@ import java.util.Collection;
 public class BfcCommand implements BasicCommand {
 
 	@Override
-	public void execute(CommandSourceStack commandSourceStack, String[] args) {
-		if (!(commandSourceStack.getSender() instanceof Player player)) {
-			MessageHandler.sendConsole("&cThis command can only be used in-game.");
+	public void execute(CommandSourceStack stack, String[] args) {
+		final CommandSender sender = stack.getSender();
+
+		// /bfc reload (works for console + players)
+		if (args.length >= 1 && isReloadArg(args[0])) {
+			handleReload(sender);
+			return;
+		}
+
+		// Everything else requires a player (claim context)
+		if (!(sender instanceof Player player)) {
+			MessageHandler.sendConsole("&cThis command can only be used in-game (except: /bfc reload).");
 			return;
 		}
 
 		final RegionHook region = BfcPlugin.getHookManager().getActiveRegionHook();
 		if (region == null) {
-			MessageHandler.sendMessage(player, "&cNo supported protection plugin is hooked.");
+			MessageHandler.sendMessage(player, "&cNo supported protection hook is active.");
 			return;
 		}
 
@@ -48,38 +57,28 @@ public class BfcCommand implements BasicCommand {
 		}
 
 		final OfflinePlayer bannedPlayer = Bukkit.getOfflinePlayer(args[0]);
+		final boolean allowBan =
+				player.hasPermission("bfc.admin")
+						|| region.isOwner(player, regionID)
+						|| region.isManager(player, regionID);
 
 		if (bannedPlayer.getUniqueId().equals(player.getUniqueId())) {
 			MessageHandler.sendMessage(player, Messages.BAN_SELF);
 			return;
-		}
-
-		if (!bannedPlayer.hasPlayedBefore()) {
-			MessageHandler.sendMessage(player, Messages.placeholders(
-					Messages.UNVALID_PLAYERNAME, args[0], player.getDisplayName(), null
-			));
+		} else if (!bannedPlayer.hasPlayedBefore()) {
+			MessageHandler.sendMessage(player,
+					Messages.placeholders(Messages.UNVALID_PLAYERNAME, args[0], player.getDisplayName(), null));
 			return;
-		}
-
-		if (region.isOwner(bannedPlayer, regionID)) {
+		} else if (region.isOwner(bannedPlayer, regionID)) {
 			MessageHandler.sendMessage(player, Messages.BAN_OWNER);
 			return;
 		}
 
-		// If target is online and has bypass, block ban
-		if (bannedPlayer.isOnline()) {
-			final Player target = bannedPlayer.getPlayer();
-			if (target != null && target.hasPermission("bfc.bypass")) {
-				MessageHandler.sendMessage(player, Messages.placeholders(
-						Messages.PROTECTED, target.getDisplayName(), null, null
-				));
-				return;
-			}
+		if (bannedPlayer.isOnline() && bannedPlayer.getPlayer() != null && bannedPlayer.getPlayer().hasPermission("bfc.bypass")) {
+			MessageHandler.sendMessage(player,
+					Messages.placeholders(Messages.PROTECTED, bannedPlayer.getPlayer().getDisplayName(), null, null));
+			return;
 		}
-
-		final boolean allowBan = player.hasPermission("bfc.admin")
-				|| region.isOwner(player, regionID)
-				|| region.isManager(player, regionID);
 
 		if (!allowBan) {
 			MessageHandler.sendMessage(player, Messages.NO_ACCESS);
@@ -88,36 +87,73 @@ public class BfcCommand implements BasicCommand {
 
 		final String claimOwner = region.getClaimOwnerName(regionID);
 
-		// Save ban
-		if (!setClaimData(regionID, bannedPlayer.getUniqueId().toString(), true)) {
+		if (setClaimData(regionID, bannedPlayer.getUniqueId().toString(), true)) {
+
+			// If target is online and currently inside the claim, immediately move them to safestop/spawn (SYNC)
+			if (bannedPlayer.isOnline() && bannedPlayer.getPlayer() != null) {
+				final Player target = bannedPlayer.getPlayer();
+
+				if (region.isInsideRegion(target, regionID)) {
+					final Location dest = (Config.SAFE_LOCATION != null)
+							? Config.SAFE_LOCATION
+							: target.getWorld().getSpawnLocation();
+
+					Bukkit.getScheduler().runTask(BfcPlugin.getPlugin(), () -> {
+						target.teleport(dest);
+						MessageHandler.sendMessage(target,
+								Messages.placeholders(Messages.BANNED_TARGET,
+										bannedPlayer.getName(),
+										player.getDisplayName(),
+										claimOwner));
+					});
+				}
+			}
+
+			MessageHandler.sendMessage(player, Messages.placeholders(Messages.BANNED, bannedPlayer.getName(), null, null));
+		} else {
 			MessageHandler.sendMessage(player, Messages.ALREADY_BANNED);
+		}
+	}
+
+	private static boolean isReloadArg(String arg) {
+		return arg.equalsIgnoreCase("reload") || arg.equalsIgnoreCase("rl");
+	}
+
+	private static void handleReload(CommandSender sender) {
+		if (!sender.hasPermission("bfc.admin") && !sender.hasPermission("bfc.reload")) {
+			// If you have a message constant for this, swap it in
+			if (sender instanceof Player p) {
+				MessageHandler.sendMessage(p, "&cYou do not have permission to do that.");
+			} else {
+				MessageHandler.sendConsole("&cYou do not have permission to do that.");
+			}
 			return;
 		}
 
-		// Notify banner
-		MessageHandler.sendMessage(player, Messages.placeholders(Messages.BANNED, bannedPlayer.getName(), null, null));
+		Bukkit.getScheduler().runTask(BfcPlugin.getPlugin(), () -> {
+			// Reload plugin config.yml (Paper)
+			BfcPlugin.getPlugin().reloadConfig();
 
-		// If target is online and currently inside this region -> immediately send to safespot/spawn
-		if (bannedPlayer.isOnline()) {
-			final Player target = bannedPlayer.getPlayer();
-			if (target != null && region.isInsideRegion(target, regionID)) {
+			// Reload your static config + messages (these must exist)
+			Config.initialize();
+			Messages.reload();
 
-				final Location dest = Config.getBannedTeleportTarget(target.getWorld());
-
-				// Teleport MUST be on main thread
-				Bukkit.getScheduler().runTask(BfcPlugin.getPlugin(), () -> {
-					target.teleport(dest);
-					MessageHandler.sendMessage(target, Messages.placeholders(
-							Messages.BANNED_TARGET, bannedPlayer.getName(), player.getDisplayName(), claimOwner
-					));
-				});
+			if (sender instanceof Player p) {
+				MessageHandler.sendMessage(p, "&aBanFromClaim reloaded (config + messages).");
+			} else {
+				MessageHandler.sendConsole("&aBanFromClaim reloaded (config + messages).");
 			}
-		}
+		});
 	}
 
 	@Override
 	public Collection<String> suggest(CommandSourceStack commandSourceStack, String[] args) {
 		String input = args.length > 0 ? args[args.length - 1].toLowerCase() : "";
+
+		// Suggest reload if they started typing it
+		if (args.length == 1 && "reload".startsWith(input)) {
+			return java.util.List.of("reload");
+		}
 
 		return Bukkit.getOnlinePlayers().stream()
 				.map(Player::getName)
@@ -127,12 +163,8 @@ public class BfcCommand implements BasicCommand {
 	}
 
 	@Override
-	public boolean canUse(CommandSender sender) {
-		return BasicCommand.super.canUse(sender);
-	}
-
-	@Override
 	public @Nullable String permission() {
+		// Keep your existing base command perm. Reload is checked manually inside handleReload().
 		return Permissions.BAN.getName();
 	}
 

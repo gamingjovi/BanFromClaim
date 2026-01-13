@@ -2,6 +2,8 @@ package no.vestlandetmc.BanFromClaim.config;
 
 public class Messages extends ConfigHandler {
 
+	private static Messages INSTANCE;
+
 	private Messages(String fileName) {
 		super(fileName);
 	}
@@ -34,7 +36,6 @@ public class Messages extends ConfigHandler {
 			LIST_BAN_ALL;
 
 	private void onLoad() {
-
 		UNVALID_PLAYERNAME = getString("unvalid-playername");
 		OUTSIDE_CLAIM = getString("outside-claim");
 		NO_ARGUMENTS = getString("no-arguments");
@@ -60,19 +61,34 @@ public class Messages extends ConfigHandler {
 		BAN_ALL = getString("ban-all");
 		UNBAN_ALL = getString("unban-all");
 		LIST_BAN_ALL = getString("list-ban-all");
-
 	}
 
+	/** Called on plugin enable */
 	public static void initialize() {
-		new Messages("messages.yml").onLoad();
+		INSTANCE = new Messages("messages.yml");
+		INSTANCE.onLoad();
+	}
+
+	/** Called by /bfc reload */
+	public static void reload() {
+		if (INSTANCE == null) {
+			// plugin might be calling reload before initialize (failsafe)
+			initialize();
+			return;
+		}
+
+		// IMPORTANT: ConfigHandler must expose reloadConfig()
+		// Most likely you already have this method (since Config has initialize()).
+		INSTANCE.reloadConfig();
+
+		// Re-assign all the static message strings
+		INSTANCE.onLoad();
 	}
 
 	public static String placeholders(String message, String target, String source, String claimowner) {
-		return message.
-				replaceAll("%target%", target).
-				replaceAll("%source%", source).
-				replaceAll("%claimowner%", claimowner);
-
+		return message
+				.replace("%target%", target == null ? "" : target)
+				.replace("%source%", source == null ? "" : source)
+				.replace("%claimowner%", claimowner == null ? "" : claimowner);
 	}
-
 }
