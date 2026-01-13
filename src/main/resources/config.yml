@@ -4,5 +4,5 @@ combatmode:
   timer-enabled: true
 kickmode: true
 teleport:
-  mode: SAFE_LOCATION        # SAFE_LOCATION | NEAREST_SAFE | PUSH_BACK
-  enforce-interval-ticks: 20 # re-check even if player doesn't move blocks (20 = 1s)
+  mode: SAFE_LOCATION
+  enforce-interval-ticks: 20

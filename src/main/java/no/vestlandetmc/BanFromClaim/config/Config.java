@@ -7,8 +7,9 @@ import org.bukkit.World;
 /**
  * Central config values (loaded from config.yml).
  *
- * BanFromClaim's default config.yml is tiny (combat + kickmode), so teleport settings are read with
- * safe defaults to avoid breaking existing installs.
+ * IMPORTANT:
+ * This project uses ConfigHandler defaults-from-file behavior.
+ * Do NOT pass non-null defaults into getString/getInt/getBoolean/etc.
  */
 public class Config extends ConfigHandler {
 
@@ -19,19 +20,8 @@ public class Config extends ConfigHandler {
 	}
 
 	public enum TeleportMode {
-		/**
-		 * Always send banned players to teleport.safelocation.* (or world spawn if not set).
-		 */
 		SAFE_LOCATION,
-
-		/**
-		 * Find a safe spot outside the claim (legacy behaviour) and fall back to safelocation/spawn.
-		 */
 		NEAREST_SAFE,
-
-		/**
-		 * Push the player back a few blocks (legacy behaviour). Falls back to safelocation/spawn if needed.
-		 */
 		PUSH_BACK;
 
 		public static TeleportMode fromString(String raw) {
@@ -44,7 +34,7 @@ public class Config extends ConfigHandler {
 		}
 	}
 
-	// Keep original field names (other classes depend on these)
+	// Existing settings (used elsewhere)
 	public static long COMBAT_TIME;
 
 	public static boolean
@@ -52,29 +42,26 @@ public class Config extends ConfigHandler {
 			TIMER_ENABLED,
 			KICKMODE;
 
-	/** How we teleport banned players. Default = SAFE_LOCATION (matches your request). */
+	// New settings
 	public static TeleportMode TELEPORT_MODE;
 
-	/**
-	 * How often we re-check a player who hasn't moved blocks (prevents "standing still inside claim").
-	 * Default: 20 ticks = 1 second.
-	 */
+	/** Re-check interval for "standing still" enforcement (ticks). */
 	public static int ENFORCE_INTERVAL_TICKS;
 
-	/** Set via /bfcsafespot (or by editing config.yml). */
+	/** Set via /bfcsafespot or config. */
 	public static Location SAFE_LOCATION;
 
 	private void onLoad() {
 
-		// Existing settings
-		COMBAT_TIME = Math.max(1L, getLong("combatmode.time", 15L));
-		COMBAT_ENABLED = getBoolean("combatmode.enabled", false);
-		TIMER_ENABLED = getBoolean("combatmode.timer-enabled", true);
-		KICKMODE = getBoolean("kickmode", true);
+		// Existing settings (fallbacks applied in Java, NOT passed into getX())
+		COMBAT_TIME = Math.max(1L, readLong("combatmode.time", 15L));
+		COMBAT_ENABLED = readBoolean("combatmode.enabled", false);
+		TIMER_ENABLED = readBoolean("combatmode.timer-enabled", true);
+		KICKMODE = readBoolean("kickmode", true);
 
-		// New settings (safe defaults if not present in config.yml)
-		TELEPORT_MODE = TeleportMode.fromString(getString("teleport.mode", TeleportMode.SAFE_LOCATION.name()));
-		ENFORCE_INTERVAL_TICKS = Math.max(1, getInt("teleport.enforce-interval-ticks", 20));
+		// New settings (safe fallbacks)
+		TELEPORT_MODE = TeleportMode.fromString(readString("teleport.mode", TeleportMode.SAFE_LOCATION.name()));
+		ENFORCE_INTERVAL_TICKS = Math.max(1, readInt("teleport.enforce-interval-ticks", 20));
 
 		loadSafeLocation();
 	}
@@ -85,7 +72,7 @@ public class Config extends ConfigHandler {
 			return;
 		}
 
-		final String worldName = getString("teleport.safelocation.world");
+		final String worldName = readString("teleport.safelocation.world", null);
 		final World world = (worldName == null) ? null : Bukkit.getWorld(worldName);
 
 		if (world == null) {
@@ -94,12 +81,12 @@ public class Config extends ConfigHandler {
 			return;
 		}
 
-		final double x = getDouble("teleport.safelocation.x");
-		final double y = getDouble("teleport.safelocation.y");
-		final double z = getDouble("teleport.safelocation.z");
+		final double x = readDouble("teleport.safelocation.x", world.getSpawnLocation().getX());
+		final double y = readDouble("teleport.safelocation.y", world.getSpawnLocation().getY());
+		final double z = readDouble("teleport.safelocation.z", world.getSpawnLocation().getZ());
 
-		final float yaw = (float) getDouble("teleport.safelocation.yaw", 0D);
-		final float pitch = (float) getDouble("teleport.safelocation.pitch", 0D);
+		final float yaw = (float) readDouble("teleport.safelocation.yaw", 0D);
+		final float pitch = (float) readDouble("teleport.safelocation.pitch", 0D);
 
 		SAFE_LOCATION = new Location(world, x, y, z, yaw, pitch);
 	}
@@ -109,7 +96,7 @@ public class Config extends ConfigHandler {
 	}
 
 	/**
-	 * Returns the configured safelocation if set, otherwise world spawn.
+	 * Returns configured safelocation if set, otherwise world spawn.
 	 * Always returns a clone to avoid accidental mutation.
 	 */
 	public static Location getBannedTeleportTarget(World fallbackWorld) {
@@ -136,5 +123,35 @@ public class Config extends ConfigHandler {
 		cfg.saveConfig();
 
 		SAFE_LOCATION = loc.clone();
+	}
+
+	// -------------------------
+	// Safe readers (no defaults passed into ConfigHandler getters)
+	// -------------------------
+
+	private String readString(String path, String fallback) {
+		if (!contains(path)) return fallback;
+		final String val = getString(path);
+		return (val == null || val.isBlank()) ? fallback : val;
+	}
+
+	private boolean readBoolean(String path, boolean fallback) {
+		if (!contains(path)) return fallback;
+		return getBoolean(path);
+	}
+
+	private int readInt(String path, int fallback) {
+		if (!contains(path)) return fallback;
+		return getInt(path);
+	}
+
+	private long readLong(String path, long fallback) {
+		if (!contains(path)) return fallback;
+		return getLong(path);
+	}
+
+	private double readDouble(String path, double fallback) {
+		if (!contains(path)) return fallback;
+		return getDouble(path);
 	}
 }

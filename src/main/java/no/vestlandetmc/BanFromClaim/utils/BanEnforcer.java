@@ -7,6 +7,7 @@ import no.vestlandetmc.BanFromClaim.hooks.RegionHook;
 import org.bukkit.Bukkit;
 import org.bukkit.GameMode;
 import org.bukkit.Location;
+import org.bukkit.World;
 import org.bukkit.entity.Player;
 
 import java.util.List;
@@ -17,8 +18,10 @@ public final class BanEnforcer {
     private BanEnforcer() {}
 
     public static void enforceAt(Player p, Location loc) {
+        if (p == null || loc == null) return;
+
         RegionHook hook = BfcPlugin.getHookManager().getActiveRegionHook();
-        if (hook == null || loc == null) return;
+        if (hook == null) return;
 
         String regionId = hook.getRegionID(loc);
         if (regionId == null) return;
@@ -30,8 +33,7 @@ public final class BanEnforcer {
         boolean banned = claimData.isAllBanned(regionId) || isPlayerBanned(claimData, p.getUniqueId(), regionId);
         if (!banned) return;
 
-        // Send them to your configured area
-        teleportToBanArea(p);
+        teleportToBanArea(p, hook, regionId);
     }
 
     private static boolean canBypass(Player p) {
@@ -39,26 +41,33 @@ public final class BanEnforcer {
     }
 
     private static boolean isPlayerBanned(ClaimData claimData, UUID uuid, String regionId) {
-        if (!claimData.checkClaim(regionId)) return false;
         List<String> list = claimData.bannedPlayers(regionId);
-        if (list == null) return false;
-        String u = uuid.toString();
-        for (String s : list) {
-            if (u.equals(s)) return true;
-        }
-        return false;
+        return list != null && list.contains(uuid.toString());
     }
 
-    public static void teleportToBanArea(Player p) {
-        Location dest;
+    /**
+     * Teleports a banned player according to Config.TELEPORT_MODE.
+     * SAFE_LOCATION -> Config.getBannedTeleportTarget()
+     * NEAREST_SAFE / PUSH_BACK are handled in RegionListener (movement enforcement).
+     * For "instant enforcement" (join/teleport/respawn), we always send to safe target.
+     */
+    public static void teleportToBanArea(Player p, RegionHook hook, String regionId) {
+        if (p == null) return;
 
-        if (Config.SEND_BANNED_TO_SAFESPOT && Config.SAFE_LOCATION != null) {
-            dest = Config.SAFE_LOCATION;
-        } else {
-            dest = p.getWorld().getSpawnLocation();
+        final World world = p.getWorld();
+        Location dest = Config.getBannedTeleportTarget(world);
+
+        // Safety: if misconfigured and safespot is inside the same region, fallback to world spawn.
+        try {
+            String destRegion = hook.getRegionID(dest);
+            if (destRegion != null && destRegion.equals(regionId)) {
+                dest = world.getSpawnLocation();
+            }
+        } catch (Throwable ignored) {
+            // If hook throws for any reason, just teleport to the target.
         }
 
-        // Run on main thread (safe)
-        Bukkit.getScheduler().runTask(BfcPlugin.getPlugin(), () -> p.teleport(dest));
+        Location finalDest = dest.clone();
+        Bukkit.getScheduler().runTask(BfcPlugin.getPlugin(), () -> p.teleport(finalDest));
     }
 }
