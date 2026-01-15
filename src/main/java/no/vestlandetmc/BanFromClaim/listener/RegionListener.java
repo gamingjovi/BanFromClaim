@@ -7,6 +7,7 @@ import no.vestlandetmc.BanFromClaim.config.Messages;
 import no.vestlandetmc.BanFromClaim.handler.MessageHandler;
 import no.vestlandetmc.BanFromClaim.handler.ParticleHandler;
 import no.vestlandetmc.BanFromClaim.hooks.RegionHook;
+import no.vestlandetmc.BanFromClaim.utils.BanEnforcer;
 import no.vestlandetmc.BanFromClaim.utils.LocationFinder;
 import no.vestlandetmc.BanFromClaim.utils.PlayerRidePlayer;
 import org.bukkit.Bukkit;
@@ -15,11 +16,13 @@ import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
+import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
-import org.bukkit.event.player.PlayerMoveEvent;
+import org.bukkit.event.player.*;
 import org.bukkit.util.Vector;
 
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -27,15 +30,20 @@ import java.util.concurrent.ConcurrentHashMap;
 /**
  * Enforces bans when players attempt to enter OR remain inside claims.
  *
+ * Fixes:
+ * - Teleport bypass (/home, /tpa, /warp, GP /trapped warmup teleport, etc.)
+ * - /trapped abuse: if banned in current claim, cancel and send to safespot immediately
+ * - Join/Respawn/World-change enforcement
+ *
+ * Modes:
  * - SAFE_LOCATION mode: always teleport to a configured safelocation (or spawn).
- * - Still-check: banned players can't "stand still on one block" to avoid enforcement.
- * - Throttle + cleanup: optimized to avoid loops and memory growth.
+ * - Still-check: banned players can't "stand still on one block" to avoid enforcement
+ *   (but note: no event fires if they literally do nothing; teleport fix covers that.)
  */
 public class RegionListener implements Listener {
 
 	private static final long TELEPORT_THROTTLE_MS = 750L;
 
-	// Static so we can clean them on quit (avoids memory growth from "every player ever to join").
 	private static final Map<UUID, Long> LAST_TELEPORT_MS = new ConcurrentHashMap<>();
 	private static final Map<UUID, Long> LAST_STILL_CHECK_MS = new ConcurrentHashMap<>();
 
@@ -46,6 +54,10 @@ public class RegionListener implements Listener {
 		LAST_TELEPORT_MS.remove(playerId);
 		LAST_STILL_CHECK_MS.remove(playerId);
 	}
+
+	/* ------------------------------------------------------------
+	 * Movement enforcement (your existing logic)
+	 * ------------------------------------------------------------ */
 
 	@EventHandler(ignoreCancelled = true)
 	public void onPlayerEnterClaim(PlayerMoveEvent event) {
@@ -145,15 +157,18 @@ public class RegionListener implements Listener {
 
 		final LocationFinder finder = new LocationFinder(greaterCorner, lesserCorner, player.getWorld().getUID(), sizeRadius);
 
+		// Find location async, TELEPORT sync (teleporting async is unsafe)
 		Bukkit.getScheduler().runTaskAsynchronously(BfcPlugin.getPlugin(), () ->
 				finder.IterateCircumferences(randomLoc -> {
 					if (!player.isOnline()) return;
 
-					if (randomLoc == null) {
-						player.teleport(Config.getBannedTeleportTarget(player.getWorld()));
-					} else {
-						player.teleport(randomLoc);
-					}
+					final Location dest = (randomLoc == null)
+							? Config.getBannedTeleportTarget(player.getWorld())
+							: randomLoc;
+
+					Bukkit.getScheduler().runTask(BfcPlugin.getPlugin(), () -> {
+						if (player.isOnline()) player.teleport(dest);
+					});
 				})
 		);
 	}
@@ -189,7 +204,6 @@ public class RegionListener implements Listener {
 			);
 		}
 
-		// Particle feedback at the attempted location.
 		try {
 			new ParticleHandler(at).drawCircle(1, sameBlock);
 		} catch (Throwable ignored) {
@@ -206,12 +220,125 @@ public class RegionListener implements Listener {
 		if (hook.hasTrust(player, claimId)) return false;
 
 		if (claimData.isAllBanned(claimId)) return true;
-
 		return isBanned(player.getUniqueId(), claimId);
 	}
 
 	private boolean isBanned(UUID uuid, String claimId) {
 		final List<String> banned = claimData.bannedPlayers(claimId);
 		return banned != null && banned.contains(uuid.toString());
+	}
+
+	/* ------------------------------------------------------------
+	 * TELEPORT FIX (stops /home + stand still, also covers GP /trapped teleport)
+	 * ------------------------------------------------------------ */
+
+	@EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+	public void onTeleport(PlayerTeleportEvent e) {
+		final Location to = e.getTo();
+		if (to == null) return;
+
+		final Player player = e.getPlayer();
+		final UUID playerId = player.getUniqueId();
+
+		final RegionHook hook = BfcPlugin.getHookManager().getActiveRegionHook();
+		if (hook == null) return;
+
+		final String regionId = hook.getRegionID(to);
+		if (regionId == null) return;
+
+		if (canBypass(player)) return;
+
+		// Preserve your "combat exception" behavior here too (optional but consistent)
+		final UUID ownerId = hook.getOwnerID(regionId);
+		if (ownerId != null) {
+			final boolean hasAttacked =
+					CombatMode.attackerContains(playerId) && ownerId.equals(CombatMode.getAttacker(playerId));
+			if (hasAttacked) return;
+		}
+
+		if (!shouldDeny(player, hook, regionId)) return;
+
+		// Force teleport destination to SAFE_LOCATION/spawn so they never land inside the banned claim
+		Location dest = Config.getBannedTeleportTarget(to.getWorld());
+
+		// Safety: don't reroute into the same region (misconfig)
+		try {
+			final String destRegion = hook.getRegionID(dest);
+			if (destRegion != null && destRegion.equals(regionId)) {
+				dest = to.getWorld().getSpawnLocation();
+			}
+		} catch (Throwable ignored) {}
+
+		e.setTo(dest);
+
+		// Optional feedback (throttled so spam doesn't happen)
+		if (!isTeleportThrottled(playerId)) {
+			sendDeniedFeedback(player, player.getLocation(), true);
+		}
+	}
+
+	/* ------------------------------------------------------------
+	 * /TRAPPED FIX (prevents "use /trapped then /home and AFK")
+	 * If they're banned in the claim they're standing in, cancel /trapped and send to safespot now.
+	 * ------------------------------------------------------------ */
+
+	@EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+	public void onCommand(PlayerCommandPreprocessEvent e) {
+		final String msg = e.getMessage().toLowerCase(Locale.ROOT);
+
+		// common forms: /trapped, /griefprevention:trapped (and variants)
+		final boolean isTrapped =
+				msg.equals("/trapped") || msg.startsWith("/trapped ")
+						|| msg.equals("/griefprevention:trapped") || msg.startsWith("/griefprevention:trapped ")
+						|| msg.equals("/gp:trapped") || msg.startsWith("/gp:trapped ");
+
+		if (!isTrapped) return;
+
+		final Player player = e.getPlayer();
+		if (canBypass(player)) return;
+
+		final RegionHook hook = BfcPlugin.getHookManager().getActiveRegionHook();
+		if (hook == null) return;
+
+		final String regionId = hook.getRegionID(player.getLocation());
+		if (regionId == null) return;
+
+		if (!shouldDeny(player, hook, regionId)) return;
+
+		// They are banned in THIS claim: don't let /trapped be abused—send them to safespot immediately.
+		e.setCancelled(true);
+
+		Bukkit.getScheduler().runTask(BfcPlugin.getPlugin(), () -> {
+			// Reuse your existing safe destination logic
+			BanEnforcer.teleportToBanArea(player, hook, regionId);
+			sendDeniedFeedback(player, player.getLocation(), true);
+		});
+	}
+
+	/* ------------------------------------------------------------
+	 * Instant enforcement edge-cases
+	 * ------------------------------------------------------------ */
+
+	@EventHandler(priority = EventPriority.MONITOR)
+	public void onJoin(PlayerJoinEvent e) {
+		Bukkit.getScheduler().runTask(BfcPlugin.getPlugin(),
+				() -> BanEnforcer.enforceAt(e.getPlayer(), e.getPlayer().getLocation()));
+	}
+
+	@EventHandler(priority = EventPriority.MONITOR)
+	public void onRespawn(PlayerRespawnEvent e) {
+		Bukkit.getScheduler().runTask(BfcPlugin.getPlugin(),
+				() -> BanEnforcer.enforceAt(e.getPlayer(), e.getRespawnLocation()));
+	}
+
+	@EventHandler(priority = EventPriority.MONITOR)
+	public void onWorldChange(PlayerChangedWorldEvent e) {
+		Bukkit.getScheduler().runTask(BfcPlugin.getPlugin(),
+				() -> BanEnforcer.enforceAt(e.getPlayer(), e.getPlayer().getLocation()));
+	}
+
+	@EventHandler
+	public void onQuit(PlayerQuitEvent e) {
+		cleanup(e.getPlayer().getUniqueId());
 	}
 }
