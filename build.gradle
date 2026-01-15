@@ -37,9 +37,12 @@ dependencies {
 
 tasks {
     shadowJar {
-        archiveFileName.set('BanFromClaim.jar')
+        archiveBaseName.set("BanFromClaim")
+        archiveVersion.set(project.version.toString())
+        archiveClassifier.set("") // removes "-all"
+
         relocate 'org.bstats', 'no.vestlandetmc.BanFromClaim.bstats'
-        minimize() // optional: strip unused classes
+        minimize() // optional; remove if it ever breaks reflections
     }
 
     jar {
